@@ -66,16 +66,18 @@ export class LivePlusRelayRoom extends DurableObject {
     }
     if(m.type==='relay_game_join'){
       const requireLicense=enabled(this.env.REQUIRE_NOT_LICENSE_SESSION);
-      let license=null;
+      let license=null,deviceId='';
       if(requireLicense){
-        license=await verifyNotLicenseSession(m.licenseSession,this.env.LICENSE_SESSION_SIGNING_KEY,{deviceId:String(m.deviceId||'')});
+        deviceId=String(m.deviceId||'').trim();
+        if(!deviceId)return json(ws,{type:'relay_error',scope:'license_session',reason:'missing_device_id',message:'Identificação do dispositivo é obrigatória para validar a sessão NOT.'});
+        license=await verifyNotLicenseSession(m.licenseSession,this.env.LICENSE_SESSION_SIGNING_KEY,{deviceId});
         if(!license.ok)return json(ws,{type:'relay_error',scope:'license_session',reason:license.reason,message:'Sessão de licença NOT inválida, expirada ou incompatível com este dispositivo.'});
       }
       let room=await this.roomState();
       if(!room||!room.active||Number(room.expiresAt||0)<=Date.now()){
         room=await this.saveRoom({code:a.code,createdAt:Date.now(),expiresAt:Date.now()+DEFAULT_TTL,consumed:true,gameId:String(m.gameId||''),active:true,provisional:true,manifest:null,lastState:null});
       }
-      this.closeOthers('game',ws);this.setRole(ws,'game',requireLicense?{licenseVerified:true,licenseExpiresAt:license.expiresAt,deviceId:String(m.deviceId||'')}:{licenseVerified:false});
+      this.closeOthers('game',ws);this.setRole(ws,'game',requireLicense?{licenseVerified:true,licenseExpiresAt:license.expiresAt,deviceId}:{licenseVerified:false});
       room=await this.saveRoom({consumed:true,gameId:String(m.gameId||room.gameId||''),expiresAt:Date.now()+ACTIVE_TTL,active:true});
       const panel=this.panel();json(ws,{type:'relay_game_ready',code:a.code,panelConnected:!!panel,relay:PROTOCOL,resumed:!panel,licenseVerified:requireLicense});if(panel)json(panel,{type:'relay_game_connected',code:a.code,gameId:room.gameId||''});this.notifyRole('ingress',{type:'relay_game_connected',code:a.code});return;
     }
