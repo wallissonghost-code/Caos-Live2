@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { verifyNotLicenseSession } from './license-session-auth.js';
 
 const PROTOCOL='websocket-relay-v1';
-const VERSION='cloudflare-relay-v7';
+const VERSION='cloudflare-relay-v8';
 const AUTOMATION_PROTOCOL='liveplus-cloud-automation-v1';
 const CODE_RE=/^[A-Z0-9]{4}-?[A-Z0-9]{4}$/;
 const DEFAULT_TTL=5*60*1000;
@@ -13,6 +13,8 @@ const parse=data=>{try{return JSON.parse(typeof data==='string'?data:new TextDec
 const cleanCode=v=>String(v||'').trim().toUpperCase();
 const norm=v=>String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
 const enabled=v=>['1','true','yes','on'].includes(String(v||'').trim().toLowerCase());
+const protectedGameIds=v=>new Set(String(v||'').split(',').map(x=>x.trim()).filter(Boolean));
+const requiresLicense=(env,gameId)=>enabled(env.REQUIRE_NOT_LICENSE_SESSION)||protectedGameIds(env.REQUIRE_NOT_LICENSE_SESSION_GAME_IDS).has(String(gameId||'').trim());
 
 export class LivePlusRelayRoom extends DurableObject {
   constructor(ctx,env){super(ctx,env);this.ctx=ctx;this.env=env;this.cooldowns=new Map();this.likeProgress=new Map();this.seenEvents=new Map()}
@@ -28,7 +30,7 @@ export class LivePlusRelayRoom extends DurableObject {
     this.ctx.acceptWebSocket(server,['pending']);
     server.serializeAttachment({role:'pending',code,authenticated:false});
     const room=await this.roomState();
-    json(server,{type:'bridge',status:'ready',authRequired:!!this.env.GAME_RELAY_KEY,licenseSessionRequired:enabled(this.env.REQUIRE_NOT_LICENSE_SESSION),service:'liveplus-game-relay',relay:PROTOCOL,automation:AUTOMATION_PROTOCOL,version:VERSION,roomActive:!!room&&Number(room.expiresAt||0)>Date.now()});
+    json(server,{type:'bridge',status:'ready',authRequired:!!this.env.GAME_RELAY_KEY,licenseSessionRequired:enabled(this.env.REQUIRE_NOT_LICENSE_SESSION),selectiveLicenseSessionRequired:protectedGameIds(this.env.REQUIRE_NOT_LICENSE_SESSION_GAME_IDS).size>0,service:'liveplus-game-relay',relay:PROTOCOL,automation:AUTOMATION_PROTOCOL,version:VERSION,roomActive:!!room&&Number(room.expiresAt||0)>Date.now()});
     return new Response(null,{status:101,webSocket:client});
   }
   sockets(role){return this.ctx.getWebSockets().filter(ws=>ws.deserializeAttachment()?.role===role)}
@@ -65,7 +67,8 @@ export class LivePlusRelayRoom extends DurableObject {
       return;
     }
     if(m.type==='relay_game_join'){
-      const requireLicense=enabled(this.env.REQUIRE_NOT_LICENSE_SESSION);
+      const gameId=String(m.gameId||'').trim();
+      const requireLicense=requiresLicense(this.env,gameId);
       let license=null,deviceId='';
       if(requireLicense){
         deviceId=String(m.deviceId||'').trim();
@@ -75,10 +78,10 @@ export class LivePlusRelayRoom extends DurableObject {
       }
       let room=await this.roomState();
       if(!room||!room.active||Number(room.expiresAt||0)<=Date.now()){
-        room=await this.saveRoom({code:a.code,createdAt:Date.now(),expiresAt:Date.now()+DEFAULT_TTL,consumed:true,gameId:String(m.gameId||''),active:true,provisional:true,manifest:null,lastState:null});
+        room=await this.saveRoom({code:a.code,createdAt:Date.now(),expiresAt:Date.now()+DEFAULT_TTL,consumed:true,gameId,active:true,provisional:true,manifest:null,lastState:null});
       }
       this.closeOthers('game',ws);this.setRole(ws,'game',requireLicense?{licenseVerified:true,licenseExpiresAt:license.expiresAt,deviceId}:{licenseVerified:false});
-      room=await this.saveRoom({consumed:true,gameId:String(m.gameId||room.gameId||''),expiresAt:Date.now()+ACTIVE_TTL,active:true});
+      room=await this.saveRoom({consumed:true,gameId:gameId||room.gameId||'',expiresAt:Date.now()+ACTIVE_TTL,active:true});
       const panel=this.panel();json(ws,{type:'relay_game_ready',code:a.code,panelConnected:!!panel,relay:PROTOCOL,resumed:!panel,licenseVerified:requireLicense});if(panel)json(panel,{type:'relay_game_connected',code:a.code,gameId:room.gameId||''});this.notifyRole('ingress',{type:'relay_game_connected',code:a.code});return;
     }
     if(m.type==='relay_ingress_join'){
@@ -124,7 +127,7 @@ export class LivePlusRelayRoom extends DurableObject {
 export default {
   async fetch(request,env){
     const url=new URL(request.url);
-    if(url.pathname==='/'||url.pathname==='/health')return Response.json({ok:true,service:'liveplus-game-relay',version:VERSION,relay:PROTOCOL,automation:AUTOMATION_PROTOCOL,authRequired:!!env.GAME_RELAY_KEY,licenseSessionRequired:enabled(env.REQUIRE_NOT_LICENSE_SESSION),provider:'cloudflare'});
+    if(url.pathname==='/'||url.pathname==='/health')return Response.json({ok:true,service:'liveplus-game-relay',version:VERSION,relay:PROTOCOL,automation:AUTOMATION_PROTOCOL,authRequired:!!env.GAME_RELAY_KEY,licenseSessionRequired:enabled(env.REQUIRE_NOT_LICENSE_SESSION),selectiveLicenseSessionRequired:protectedGameIds(env.REQUIRE_NOT_LICENSE_SESSION_GAME_IDS).size>0,protectedGameCount:protectedGameIds(env.REQUIRE_NOT_LICENSE_SESSION_GAME_IDS).size,provider:'cloudflare'});
     if(url.pathname!=='/relay')return new Response('Not found',{status:404});
     if(request.headers.get('Upgrade')!=='websocket')return new Response('WebSocket required',{status:426});
     const code=cleanCode(url.searchParams.get('code'));if(!CODE_RE.test(code))return new Response('Invalid session code',{status:400});
