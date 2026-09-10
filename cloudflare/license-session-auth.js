@@ -1,6 +1,8 @@
 const enc=new TextEncoder();
 const b64urlDecode=value=>{const s=String(value||'').replace(/-/g,'+').replace(/_/g,'/');const pad=s+'='.repeat((4-s.length%4)%4);const raw=atob(pad);return Uint8Array.from(raw,c=>c.charCodeAt(0))};
 const safeJson=value=>{try{return JSON.parse(new TextDecoder().decode(b64urlDecode(value)))}catch{return null}};
+const hex=bytes=>Array.from(new Uint8Array(bytes),b=>b.toString(16).padStart(2,'0')).join('');
+const hashDeviceId=async deviceId=>hex(await crypto.subtle.digest('SHA-256',enc.encode(String(deviceId))));
 
 export async function verifyNotLicenseSession(token,secret,{deviceId='',now=Date.now()}={}){
   const raw=String(token||'').trim();
@@ -17,6 +19,6 @@ export async function verifyNotLicenseSession(token,secret,{deviceId='',now=Date
   if(!payload||payload.v!==1)return{ok:false,reason:'invalid_payload'};
   const exp=Number(payload.exp||0)*1000;
   if(!exp||exp<=now)return{ok:false,reason:'expired'};
-  if(deviceId&&String(payload.dev||'')!==String(deviceId))return{ok:false,reason:'device_mismatch'};
+  if(deviceId&&String(payload.dev||'')!==await hashDeviceId(deviceId))return{ok:false,reason:'device_mismatch'};
   return{ok:true,payload,expiresAt:exp};
 }
